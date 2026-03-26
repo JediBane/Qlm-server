@@ -23,6 +23,14 @@ http.createServer((req, res) => {
   let body = "";
   req.on("data", chunk => body += chunk);
   req.on("end", () => {
+
+    // Force Haiku — override whatever model the client sends
+    try {
+      const parsed = JSON.parse(body);
+      parsed.model = "claude-haiku-4-5-20251001";
+      body = JSON.stringify(parsed);
+    } catch(e) {}
+
     const options = {
       hostname: "api.anthropic.com",
       path:     "/v1/messages",
