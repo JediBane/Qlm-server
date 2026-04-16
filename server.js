@@ -135,8 +135,6 @@ http.createServer((req, res) => {
     }
 
     // ── Lead search with web_search tool  POST /api/lead-search ─────────
-    // Injects the web_search_20250305 tool so Claude can browse live job boards.
-    // Aggregates multi-turn tool_use/tool_result exchanges and returns final text.
     if (url === '/api/lead-search') {
       if (!API_KEY) {
         res.writeHead(500, {'Content-Type':'application/json'});
@@ -158,7 +156,7 @@ http.createServer((req, res) => {
         return;
       }
 
-      // Helper: make one Anthropic call, return parsed response body
+      // Make one call to Anthropic, return full parsed response
       function anthropicCall(messages) {
         return new Promise((resolve, reject) => {
           const requestBody = JSON.stringify({
@@ -183,7 +181,7 @@ http.createServer((req, res) => {
             r.on('data', chunk => data += chunk);
             r.on('end', () => {
               try { resolve(JSON.parse(data)); }
-              catch(e) { reject(new Error('Failed to parse Anthropic response: ' + data.slice(0,200))); }
+              catch(e) { reject(new Error('Parse error: ' + data.slice(0,200))); }
             });
           });
           req2.on('error', reject);
@@ -193,11 +191,10 @@ http.createServer((req, res) => {
       }
 
       try {
-        // Agentic loop: keep calling until stop_reason is 'end_turn' (no more tool calls)
         let messages = [{ role: 'user', content: prompt }];
         let finalText = '';
         let iterations = 0;
-        const MAX_ITER = 8; // safety cap
+        const MAX_ITER = 10;
 
         while (iterations < MAX_ITER) {
           iterations++;
@@ -207,32 +204,38 @@ http.createServer((req, res) => {
 
           const content = response.content || [];
 
-          // Collect any text from this turn
-          const textBlocks = content.filter(b => b.type === 'text').map(b => b.text).join('');
-          if (textBlocks) finalText = textBlocks; // keep latest text
+          // Collect text blocks from this response
+          const textBlocks = content.filter(b => b.type === 'text');
+          if (textBlocks.length) {
+            finalText = textBlocks.map(b => b.text).join('');
+          }
 
-          // Check if done
+          // If done, break
           if (response.stop_reason === 'end_turn') break;
 
-          // Handle tool_use blocks — build tool_result messages
+          // Handle tool_use — web_search results come back as tool_result in next user turn
           const toolUseBlocks = content.filter(b => b.type === 'tool_use');
-          if (!toolUseBlocks.length) break; // no tools called, we're done
+          if (!toolUseBlocks.length) break;
 
-          // Add assistant message with tool_use content
+          // Add the full assistant response to history
           messages.push({ role: 'assistant', content });
 
-          // Add user message with tool_result for each tool call
-          // (web_search results are returned by Anthropic automatically in the response,
-          //  but we need to feed them back as tool_result blocks)
+          // For web_search, Anthropic handles the search and returns results
+          // in the tool_result content automatically — we just need to acknowledge
+          // each tool_use block. The actual search results are in server_tool_use
+          // blocks which are handled server-side by Anthropic.
+          // We feed back tool_result with empty content to continue the loop.
           const toolResults = toolUseBlocks.map(tu => ({
             type:        'tool_result',
             tool_use_id: tu.id,
-            content:     tu.type === 'web_search' ? (tu.output || '') : ''
+            content:     tu.content || ''
           }));
+
           messages.push({ role: 'user', content: toolResults });
         }
 
-        // Return final text to the client
+        console.log(`Lead search: ${iterations} iterations, response length: ${finalText.length}`);
+
         res.writeHead(200, {
           'Content-Type':                'application/json',
           'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
