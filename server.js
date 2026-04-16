@@ -141,31 +141,28 @@ http.createServer((req, res) => {
         res.end(JSON.stringify({ error: { message: 'ANTHROPIC_KEY not set on server.' } }));
         return;
       }
-
-      let parsed;
-      try { parsed = JSON.parse(body); } catch(e) {
+      let parsed2;
+      try { parsed2 = JSON.parse(body); } catch(e) {
         res.writeHead(400, {'Content-Type':'application/json'});
         res.end(JSON.stringify({ error: { message: 'Invalid JSON body' } }));
         return;
       }
-
-      const prompt = parsed.prompt || '';
-      if (!prompt) {
+      const leadPrompt = parsed2.prompt || '';
+      if (!leadPrompt) {
         res.writeHead(400, {'Content-Type':'application/json'});
         res.end(JSON.stringify({ error: { message: 'prompt field required' } }));
         return;
       }
 
-      // Make one call to Anthropic, return full parsed response
-      function anthropicCall(messages) {
+      function anthropicWebCall(msgs) {
         return new Promise((resolve, reject) => {
-          const requestBody = JSON.stringify({
+          const rb = JSON.stringify({
             model:      'claude-haiku-4-5-20251001',
-            max_tokens: 4000,
+            max_tokens: 2000,
             tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-            messages
+            messages: msgs
           });
-          const options = {
+          const opts = {
             hostname: 'api.anthropic.com',
             path:     '/v1/messages',
             method:   'POST',
@@ -173,78 +170,47 @@ http.createServer((req, res) => {
               'Content-Type':      'application/json',
               'anthropic-version': '2023-06-01',
               'x-api-key':         API_KEY,
-              'Content-Length':    Buffer.byteLength(requestBody),
+              'Content-Length':    Buffer.byteLength(rb),
             }
           };
-          let data = '';
-          const req2 = https.request(options, r => {
-            r.on('data', chunk => data += chunk);
-            r.on('end', () => {
-              try { resolve(JSON.parse(data)); }
-              catch(e) { reject(new Error('Parse error: ' + data.slice(0,200))); }
-            });
+          let d = '';
+          const r2 = https.request(opts, apiR => {
+            apiR.on('data', c => d += c);
+            apiR.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { reject(new Error('Parse error: ' + d.slice(0,200))); } });
           });
-          req2.on('error', reject);
-          req2.write(requestBody);
-          req2.end();
+          r2.on('error', reject);
+          r2.write(rb);
+          r2.end();
         });
       }
 
-      try {
-        let messages = [{ role: 'user', content: prompt }];
+      const doSearch = async () => {
+        let msgs = [{ role: 'user', content: leadPrompt }];
         let finalText = '';
-        let iterations = 0;
-        const MAX_ITER = 10;
-
-        while (iterations < MAX_ITER) {
-          iterations++;
-          const response = await anthropicCall(messages);
-
-          if (response.error) throw new Error(response.error.message || JSON.stringify(response.error));
-
-          const content = response.content || [];
-
-          // Collect text blocks from this response
-          const textBlocks = content.filter(b => b.type === 'text');
-          if (textBlocks.length) {
-            finalText = textBlocks.map(b => b.text).join('');
-          }
-
-          // If done, break
-          if (response.stop_reason === 'end_turn') break;
-
-          // Handle tool_use — web_search results come back as tool_result in next user turn
-          const toolUseBlocks = content.filter(b => b.type === 'tool_use');
-          if (!toolUseBlocks.length) break;
-
-          // Add the full assistant response to history
-          messages.push({ role: 'assistant', content });
-
-          // For web_search, Anthropic handles the search and returns results
-          // in the tool_result content automatically — we just need to acknowledge
-          // each tool_use block. The actual search results are in server_tool_use
-          // blocks which are handled server-side by Anthropic.
-          // We feed back tool_result with empty content to continue the loop.
-          const toolResults = toolUseBlocks.map(tu => ({
-            type:        'tool_result',
-            tool_use_id: tu.id,
-            content:     tu.content || ''
-          }));
-
-          messages.push({ role: 'user', content: toolResults });
+        const MAX = 6;
+        for (let i = 0; i < MAX; i++) {
+          const resp = await anthropicWebCall(msgs);
+          if (resp.error) throw new Error(resp.error.message || JSON.stringify(resp.error));
+          const content = resp.content || [];
+          const texts = content.filter(b => b.type === 'text').map(b => b.text).join('');
+          if (texts) finalText = texts;
+          if (resp.stop_reason === 'end_turn') break;
+          const tools = content.filter(b => b.type === 'tool_use');
+          if (!tools.length) break;
+          msgs.push({ role: 'assistant', content });
+          msgs.push({ role: 'user', content: tools.map(t => ({ type: 'tool_result', tool_use_id: t.id, content: t.content || '' })) });
         }
+        return finalText;
+      };
 
-        console.log(`Lead search: ${iterations} iterations, response length: ${finalText.length}`);
+      // Race against 55s timeout (Railway kills at 60s)
+      const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('Search timed out — try again.')), 55000));
 
-        res.writeHead(200, {
-          'Content-Type':                'application/json',
-          'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
-        });
-        res.end(JSON.stringify({
-          content: [{ type: 'text', text: finalText }],
-          iterations
-        }));
-
+      try {
+        const text = await Promise.race([doSearch(), timeout]);
+        console.log('Lead search done, length:', text.length);
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': ALLOWED_ORIGIN });
+        res.end(JSON.stringify({ content: [{ type: 'text', text }] }));
       } catch(e) {
         console.error('Lead search error:', e.message);
         res.writeHead(500, {'Content-Type':'application/json'});
