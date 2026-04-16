@@ -32,6 +32,23 @@ app.get('/', (req, res) => {
   });
 });
 
+// ─── ROOT POST (backwards compat — Talent Card posts to /) ────────────────
+app.post('/', async (req, res) => {
+  try {
+    const { model, max_tokens, messages, system } = req.body;
+    const response = await anthropic.messages.create({
+      model: model || 'claude-haiku-4-5-20251001',
+      max_tokens: max_tokens || 1000,
+      messages,
+      ...(system ? { system } : {}),
+    });
+    res.json(response);
+  } catch (err) {
+    console.error('Root POST error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── ANTHROPIC CHAT PROXY ─────────────────────────────────────────────────
 app.post('/api/chat', async (req, res) => {
   try {
