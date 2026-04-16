@@ -134,6 +134,122 @@ http.createServer((req, res) => {
       return;
     }
 
+    // ── Lead search with web_search tool  POST /api/lead-search ─────────
+    // Injects the web_search_20250305 tool so Claude can browse live job boards.
+    // Aggregates multi-turn tool_use/tool_result exchanges and returns final text.
+    if (url === '/api/lead-search') {
+      if (!API_KEY) {
+        res.writeHead(500, {'Content-Type':'application/json'});
+        res.end(JSON.stringify({ error: { message: 'ANTHROPIC_KEY not set on server.' } }));
+        return;
+      }
+
+      let parsed;
+      try { parsed = JSON.parse(body); } catch(e) {
+        res.writeHead(400, {'Content-Type':'application/json'});
+        res.end(JSON.stringify({ error: { message: 'Invalid JSON body' } }));
+        return;
+      }
+
+      const prompt = parsed.prompt || '';
+      if (!prompt) {
+        res.writeHead(400, {'Content-Type':'application/json'});
+        res.end(JSON.stringify({ error: { message: 'prompt field required' } }));
+        return;
+      }
+
+      // Helper: make one Anthropic call, return parsed response body
+      function anthropicCall(messages) {
+        return new Promise((resolve, reject) => {
+          const requestBody = JSON.stringify({
+            model:      'claude-haiku-4-5-20251001',
+            max_tokens: 4000,
+            tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+            messages
+          });
+          const options = {
+            hostname: 'api.anthropic.com',
+            path:     '/v1/messages',
+            method:   'POST',
+            headers: {
+              'Content-Type':      'application/json',
+              'anthropic-version': '2023-06-01',
+              'x-api-key':         API_KEY,
+              'Content-Length':    Buffer.byteLength(requestBody),
+            }
+          };
+          let data = '';
+          const req2 = https.request(options, r => {
+            r.on('data', chunk => data += chunk);
+            r.on('end', () => {
+              try { resolve(JSON.parse(data)); }
+              catch(e) { reject(new Error('Failed to parse Anthropic response: ' + data.slice(0,200))); }
+            });
+          });
+          req2.on('error', reject);
+          req2.write(requestBody);
+          req2.end();
+        });
+      }
+
+      try {
+        // Agentic loop: keep calling until stop_reason is 'end_turn' (no more tool calls)
+        let messages = [{ role: 'user', content: prompt }];
+        let finalText = '';
+        let iterations = 0;
+        const MAX_ITER = 8; // safety cap
+
+        while (iterations < MAX_ITER) {
+          iterations++;
+          const response = await anthropicCall(messages);
+
+          if (response.error) throw new Error(response.error.message || JSON.stringify(response.error));
+
+          const content = response.content || [];
+
+          // Collect any text from this turn
+          const textBlocks = content.filter(b => b.type === 'text').map(b => b.text).join('');
+          if (textBlocks) finalText = textBlocks; // keep latest text
+
+          // Check if done
+          if (response.stop_reason === 'end_turn') break;
+
+          // Handle tool_use blocks — build tool_result messages
+          const toolUseBlocks = content.filter(b => b.type === 'tool_use');
+          if (!toolUseBlocks.length) break; // no tools called, we're done
+
+          // Add assistant message with tool_use content
+          messages.push({ role: 'assistant', content });
+
+          // Add user message with tool_result for each tool call
+          // (web_search results are returned by Anthropic automatically in the response,
+          //  but we need to feed them back as tool_result blocks)
+          const toolResults = toolUseBlocks.map(tu => ({
+            type:        'tool_result',
+            tool_use_id: tu.id,
+            content:     tu.type === 'web_search' ? (tu.output || '') : ''
+          }));
+          messages.push({ role: 'user', content: toolResults });
+        }
+
+        // Return final text to the client
+        res.writeHead(200, {
+          'Content-Type':                'application/json',
+          'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+        });
+        res.end(JSON.stringify({
+          content: [{ type: 'text', text: finalText }],
+          iterations
+        }));
+
+      } catch(e) {
+        console.error('Lead search error:', e.message);
+        res.writeHead(500, {'Content-Type':'application/json'});
+        res.end(JSON.stringify({ error: { message: e.message } }));
+      }
+      return;
+    }
+
     // Anthropic AI proxy  POST / or POST /api/chat
     if (url === '/' || url === '/api/chat') {
       if (!API_KEY) {
