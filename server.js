@@ -200,6 +200,16 @@ http.createServer((req, res) => {
           msgs.push({ role: 'assistant', content });
           msgs.push({ role: 'user', content: tools.map(t => ({ type: 'tool_result', tool_use_id: t.id, content: t.content || '' })) });
         }
+
+        // If final text has no JSON array, force one more turn demanding JSON output
+        if (!finalText.match(/\[[\s\S]*\]/)) {
+          msgs.push({ role: 'assistant', content: [{ type: 'text', text: finalText || 'I searched but could not format results.' }] });
+          msgs.push({ role: 'user', content: 'Output the results you found as a raw JSON array now. Include every company you found, even partial results. If the local market is small include nearby companies within 50 miles. Start your response with [ and end with ]. No explanation, no preamble — only the JSON array.' });
+          const finalResp = await anthropicWebCall(msgs);
+          const finalTexts = (finalResp.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+          if (finalTexts) finalText = finalTexts;
+        }
+
         return finalText;
       };
 
